@@ -24,10 +24,12 @@ from dashboard.branding import (
     two_circles_wordmark,
 )
 from dashboard.config import (
+    APP_DATA_DIR,
     APP_TITLE,
     COMPETITION_OPTIONS,
     DEFAULT_HISTORICAL_SEASONS,
     PLANNING_SEASON_LABEL,
+    PROJECT_ROOT,
     SACA_LOGO_PATH,
     STRIKERS_LOGO_PATH,
 )
@@ -90,6 +92,7 @@ PROCESSED_OUTPUT_FILENAMES = (
 DUMMY_2627_SOURCE = "demo_26_27_dummy_august"
 DUMMY_2627_START = pd.Timestamp("2026-08-01")
 DUMMY_2627_END = pd.Timestamp("2026-08-31")
+DEFAULT_APP_DATA_DIR = PROJECT_ROOT / "data"
 
 SETUP_FILE_COPY = {
     "bbl_tickets": {
@@ -318,43 +321,52 @@ def main() -> None:
         _render_client_setup()
         return
 
-    bundle, global_context = _load_app_context()
-    if bundle.matches.empty:
+    try:
+        bundle, global_context = _load_app_context()
+        if bundle.matches.empty:
+            _render_app_header(bundle, global_context)
+            _render_top_nav()
+            st.error("No fixture model is available yet. Add client CSVs in Data Admin or data/raw/ and reprocess.")
+            _render_data_admin(bundle)
+            return
+
+        reference_date = _reference_date(bundle)
+        pace_engine, forecaster = cached_models(bundle.matches, bundle.daily_sales, reference_date)
         _render_app_header(bundle, global_context)
-        _render_top_nav()
-        st.error("No fixture model is available yet. Add client CSVs in Data Admin or data/raw/ and reprocess.")
-        _render_data_admin(bundle)
-        return
+        page = _render_top_nav()
 
-    reference_date = _reference_date(bundle)
-    pace_engine, forecaster = cached_models(bundle.matches, bundle.daily_sales, reference_date)
-    _render_app_header(bundle, global_context)
-    page = _render_top_nav()
+        if page == "Historic Sales":
+            _render_historic_sales(bundle)
+        elif page == "Fixture Forecasting":
+            _render_fixture_forecasting_table(bundle, pace_engine, forecaster)
+        elif page == "Target Breakdown":
+            controls = _target_breakdown_controls(bundle)
+            _render_target_breakdown(bundle, pace_engine, forecaster, controls)
+        elif page == "Audience Insights":
+            _render_audience_insights_tracking(bundle, pace_engine, forecaster, global_context)
+        elif page == "Audience & Marketing Planner":
+            controls = _inline_planning_controls(bundle, "audience_planner", include_customer_filters=False)
+            context = _build_page_context(bundle, pace_engine, forecaster, controls)
+            _render_audience_marketing_planner(bundle, controls, context, global_context)
+        elif page == "Reports":
+            controls = _inline_planning_controls(bundle, "reports", include_customer_filters=False)
+            context = _build_page_context(bundle, pace_engine, forecaster, controls)
+            _render_reports(context, controls, bundle, global_context)
+        elif page == "Future Fixture Assumptions":
+            _render_future_fixtures(bundle)
+        elif page == "Data Admin":
+            _render_data_admin(bundle)
+    except Exception as exc:  # pragma: no cover - surfaced directly in Streamlit
+        st.session_state["client_setup_complete"] = False
+        st.session_state["page"] = "Client Setup"
+        st.session_state["nav_section"] = "Data & Admin"
+        st.session_state["nav_page"] = "Client Setup"
+        st.session_state["client_setup_runtime_error"] = _runtime_error_summary(exc)
+        _clear_pipeline_caches()
+        _render_client_setup(runtime_error=exc)
 
-    if page == "Historic Sales":
-        _render_historic_sales(bundle)
-    elif page == "Fixture Forecasting":
-        _render_fixture_forecasting_table(bundle, pace_engine, forecaster)
-    elif page == "Target Breakdown":
-        controls = _target_breakdown_controls(bundle)
-        _render_target_breakdown(bundle, pace_engine, forecaster, controls)
-    elif page == "Audience Insights":
-        _render_audience_insights_tracking(bundle, pace_engine, forecaster, global_context)
-    elif page == "Audience & Marketing Planner":
-        controls = _inline_planning_controls(bundle, "audience_planner", include_customer_filters=False)
-        context = _build_page_context(bundle, pace_engine, forecaster, controls)
-        _render_audience_marketing_planner(bundle, controls, context, global_context)
-    elif page == "Reports":
-        controls = _inline_planning_controls(bundle, "reports", include_customer_filters=False)
-        context = _build_page_context(bundle, pace_engine, forecaster, controls)
-        _render_reports(context, controls, bundle, global_context)
-    elif page == "Future Fixture Assumptions":
-        _render_future_fixtures(bundle)
-    elif page == "Data Admin":
-        _render_data_admin(bundle)
 
-
-def _render_client_setup() -> None:
+def _render_client_setup(runtime_error: Exception | None = None) -> None:
     expected = expected_file_dataframe()
     detected = detect_source_files(RAW_DATA_DIR)
     expected = expected.assign(
@@ -365,6 +377,10 @@ def _render_client_setup() -> None:
     optional_ready = int(expected[~expected["required"].astype(bool)]["detected_file"].astype(str).ne("").sum())
     saved_version = _client_saved_version_summary()
     processed_ready = bool(saved_version["processed_ready"])
+    runtime_error_text = str(st.session_state.get("client_setup_runtime_error", "")).strip()
+    if runtime_error is not None:
+        runtime_error_text = _runtime_error_summary(runtime_error)
+        st.session_state["client_setup_runtime_error"] = runtime_error_text
 
     st.markdown(
         f"""
@@ -398,6 +414,20 @@ def _render_client_setup() -> None:
         """,
         unsafe_allow_html=True,
     )
+    if runtime_error_text:
+        st.warning(
+            "The saved dashboard data could not be reopened, so the app has returned to the upload screen instead of crashing."
+        )
+        st.caption(runtime_error_text)
+        if _uses_managed_runtime_storage():
+            reset_cols = st.columns([1.2, 2.8])
+            if reset_cols[0].button("Reset hosted saved data", use_container_width=True):
+                removed = _clear_saved_runtime_state()
+                st.success(f"Cleared {removed} hosted runtime file(s).")
+                st.rerun()
+            reset_cols[1].caption(
+                "This clears hosted uploads, processed outputs, and saved fixture targets stored in the temporary runtime only."
+            )
     _render_saved_version_panel(saved_version)
 
     st.markdown('<div class="section-kicker">Client data upload</div>', unsafe_allow_html=True)
@@ -431,6 +461,7 @@ def _render_client_setup() -> None:
     run_clicked = action_cols[0].button("Ingest data and build model", type="primary", use_container_width=True)
     open_label = "Open saved dashboard" if processed_ready else "Open current dashboard"
     if action_cols[1].button(open_label, use_container_width=True, disabled=not processed_ready):
+        st.session_state["client_setup_runtime_error"] = ""
         st.session_state["client_setup_complete"] = True
         st.session_state["page"] = "Fixture Forecasting"
         st.session_state["nav_section"] = "Pre On Sale"
@@ -548,6 +579,47 @@ def _clear_pipeline_caches() -> None:
         cached_function.clear()
 
 
+def _uses_managed_runtime_storage() -> bool:
+    try:
+        return APP_DATA_DIR.resolve() != DEFAULT_APP_DATA_DIR.resolve()
+    except OSError:
+        return str(APP_DATA_DIR) != str(DEFAULT_APP_DATA_DIR)
+
+
+def _saved_runtime_paths() -> list[Path]:
+    raw_paths = list(RAW_DATA_DIR.glob("*.csv")) if RAW_DATA_DIR.exists() else []
+    processed_paths = [PROCESSED_DATA_DIR / filename for filename in PROCESSED_OUTPUT_FILENAMES]
+    return raw_paths + processed_paths + [FIXTURE_TARGETS_PATH, CLIENT_VERSION_PATH]
+
+
+def _clear_saved_runtime_state() -> int:
+    deleted = 0
+    for path in _saved_runtime_paths():
+        if not path.exists():
+            continue
+        try:
+            path.unlink()
+            deleted += 1
+        except OSError:
+            continue
+    st.session_state["fixture_targets"] = {}
+    st.session_state.pop("fixture_targets_saved_at", None)
+    st.session_state["client_setup_complete"] = False
+    st.session_state["page"] = "Client Setup"
+    st.session_state["nav_section"] = "Data & Admin"
+    st.session_state["nav_page"] = "Client Setup"
+    st.session_state["client_setup_runtime_error"] = ""
+    _clear_pipeline_caches()
+    return deleted
+
+
+def _runtime_error_summary(exc: Exception) -> str:
+    detail = str(exc).strip()
+    if detail:
+        return f"{type(exc).__name__}: {detail}"
+    return type(exc).__name__
+
+
 def _has_future_fixture_input(uploaded_files: dict[str, tuple[str, object]]) -> bool:
     if "future_fixtures" in uploaded_files:
         return True
@@ -597,6 +669,7 @@ def _run_client_setup_pipeline(uploaded_files: dict[str, tuple[str, object]]) ->
                 label=f"Model ready: {training_rows:,} training snapshots, {scored_count:,} next-season fixture forecasts",
                 state="complete",
             )
+            st.session_state["client_setup_runtime_error"] = ""
             st.session_state["client_setup_complete"] = True
             st.session_state["client_setup_summary"] = {
                 "training_rows": training_rows,
@@ -3079,7 +3152,10 @@ def _store_fixture_target(fixture_id: str, base_target: float, stretch_target: f
 def _load_fixture_targets(path: Path = FIXTURE_TARGETS_PATH) -> dict[str, dict[str, float]]:
     if not path.exists():
         return {}
-    frame = pd.read_csv(path)
+    try:
+        frame = pd.read_csv(path)
+    except (OSError, UnicodeDecodeError, pd.errors.EmptyDataError, pd.errors.ParserError):
+        return {}
     required = {"fixture_id", "base_target", "stretch_target"}
     if frame.empty or not required.issubset(frame.columns):
         return {}
@@ -4091,6 +4167,7 @@ def _init_session_state() -> None:
     st.session_state.setdefault("fixture_seed", 2026)
     st.session_state.setdefault("fixture_targets", _load_fixture_targets())
     st.session_state.setdefault("client_setup_complete", False)
+    st.session_state.setdefault("client_setup_runtime_error", "")
 
 
 if __name__ == "__main__":

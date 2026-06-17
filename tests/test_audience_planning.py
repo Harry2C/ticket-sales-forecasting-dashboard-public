@@ -126,6 +126,13 @@ def test_page_state_keys_are_page_scoped():
     assert page_state_key("audience_planner", "season") != page_state_key("target_breakdown", "competition")
 
 
+def test_load_fixture_targets_ignores_malformed_csv(tmp_path):
+    path = tmp_path / "fixture_targets.csv"
+    path.write_text('fixture_id,base_target,stretch_target\n"broken', encoding="utf-8")
+
+    assert _load_fixture_targets(path) == {}
+
+
 def test_expected_purchase_index_uses_same_point_in_cycle_for_ticket_class():
     frame = expected_purchase_index(
         _ticket_rows(),
