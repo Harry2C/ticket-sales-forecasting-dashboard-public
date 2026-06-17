@@ -28,8 +28,8 @@ spreadsheet data files. Users upload their own files at runtime.
 - For durable private client data, use a paid host with persistent disk or add an
   external store such as S3, Snowflake, or a database.
 - The upload limit is configured in `.streamlit/config.toml` as `250 MB`.
-- Python is pinned in `runtime.txt` so Streamlit Cloud uses a version compatible
-  with the pinned analytics dependencies.
+- In Streamlit Cloud app settings, set the Python version to `3.12` so the
+  pinned analytics dependencies install from compatible wheels.
 
 ## Local Equivalent
 
